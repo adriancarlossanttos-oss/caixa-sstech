@@ -3,7 +3,7 @@ import httpx
 import pandas as pd
 from datetime import datetime
 
-# Configuração da Página para ocupar a tela toda
+# Configuração da Página
 st.set_page_config(page_title="SS TECH PRO WEB", layout="wide", initial_sidebar_state="expanded")
 
 # Credenciais Supabase
@@ -19,7 +19,9 @@ HEADERS = {
 def buscar_dados(tabela):
     try:
         response = httpx.get(f"{URL}/{tabela}", headers=HEADERS)
-        return response.json()
+        dados = response.json()
+        # Filtra apenas itens que possuem 'codigo' e 'nome' válidos para evitar o TypeError
+        return [p for p in dados if isinstance(p, dict) and 'codigo' in p and 'nome' in p]
     except:
         return []
 
@@ -29,149 +31,121 @@ st.sidebar.title("🚀 SS TECH SISTEMAS")
 menu = st.sidebar.radio("Navegação:",
                         ["CAIXA", "VENDAS", "ESTOQUE", "FIADO", "FLUXO CAIXA", "PRÓXIMAS COMPRAS", "GRÁFICO"])
 
-# --- 1. CAIXA (FRENTE DE VENDA) ---
+# --- 1. CAIXA ---
 if menu == "CAIXA":
     st.header("🛒 Frente de Caixa")
     estoque = buscar_dados("estoque")
 
     if estoque:
-        # CORREÇÃO DEFINITIVA DO ERRO DE TYPEERROR:
-        prod_nomes = [f"{p['codigo']} - {p['nome']}" for p in estoque]
+        # Formatação segura para evitar o erro de 'redacted'
+        prod_nomes = [f"{str(p['codigo'])} - {str(p['nome'])}" for p in estoque]
 
         col1, col2 = st.columns([2, 1])
         with col1:
             selecionado = st.selectbox("Selecione o Produto", prod_nomes)
-            # Localiza o item no banco
-            item = next(p for p in estoque if f"{p['codigo']} - {p['nome']}" == selecionado)
+            item_cod_bruto = selecionado.split(" - ")[0]
+            item = next(p for p in estoque if str(p['codigo']) == item_cod_bruto)
 
             qtd = st.number_input("Quantidade", min_value=1, step=1)
             cliente = st.text_input("Nome do Cliente", "CONSUMIDOR")
-            metodo = st.selectbox("Método de Pagamento",
-                                  ["Dinheiro", "Pix", "Cartão Débito", "Cartão Crédito", "FIADO"])
+            metodo = st.selectbox("Pagamento", ["Dinheiro", "Pix", "Cartão Débito", "Cartão Crédito", "FIADO"])
 
         with col2:
-            subtotal = float(item['preco_venda']) * qtd
+            preco_venda = float(item.get('preco_venda', 0))
+            subtotal = preco_venda * qtd
             desconto = st.number_input("Desconto (R$)", min_value=0.0, value=0.0)
             total_final = subtotal - desconto
             st.metric("Total a Pagar", f"R$ {total_final:.2f}")
 
             if st.button("FINALIZAR VENDA", use_container_width=True):
-                # 1. Registrar na tabela de Vendas
                 venda_payload = {
-                    "cod_item": item['codigo'],
-                    "produto": item['nome'],
-                    "quantidade": qtd,
-                    "subtotal": subtotal,
-                    "desconto": desconto,
-                    "total_liq": total_final,
-                    "cliente": cliente,
-                    "metodo": metodo,
-                    "vendedor": "WEB-MOBILE"
+                    "cod_item": item['codigo'], "produto": item['nome'], "quantidade": qtd,
+                    "subtotal": subtotal, "desconto": desconto, "total_liq": total_final,
+                    "cliente": cliente, "metodo": metodo, "vendedor": "WEB-MOBILE"
                 }
                 httpx.post(f"{URL}/vendas", headers=HEADERS, json=venda_payload)
 
-                # 2. Atualizar estoque (Somar na coluna 'vendas')
-                nova_qtd_vendas = (item.get('vendas') or 0) + qtd
+                vendas_atuais = int(item.get('vendas', 0))
                 httpx.patch(f"{URL}/estoque?codigo=eq.{item['codigo']}", headers=HEADERS,
-                            json={"vendas": nova_qtd_vendas})
+                            json={"vendas": vendas_atuais + qtd})
 
-                # 3. Se for FIADO, registrar na tabela de fiado
                 if metodo == "FIADO":
-                    fiado_payload = {"cliente": cliente, "valor": total_final, "data": str(datetime.now()),
-                                     "status": "PENDENTE"}
-                    httpx.post(f"{URL}/fiado", headers=HEADERS, json=fiado_payload)
+                    httpx.post(f"{URL}/fiado", headers=HEADERS,
+                               json={"cliente": cliente, "valor": total_final, "status": "PENDENTE"})
 
-                st.success(f"✅ Venda de {item['nome']} finalizada!")
+                st.success("✅ Venda Finalizada!")
                 st.rerun()
 
-# --- 2. VENDAS (RELATÓRIO HISTÓRICO) ---
+# --- 2. VENDAS ---
 elif menu == "VENDAS":
-    st.header("📋 Relatório Geral de Vendas")
+    st.header("📋 Histórico de Vendas")
     vendas = buscar_dados("vendas")
     if vendas:
-        df_vendas = pd.DataFrame(vendas)
-        st.dataframe(df_vendas, use_container_width=True)
-        st.download_button("Baixar Relatório (CSV)", df_vendas.to_csv(), "vendas.csv")
+        st.dataframe(pd.DataFrame(vendas), use_container_width=True)
 
-# --- 3. ESTOQUE (GESTÃO E EDIÇÃO) ---
+# --- 3. ESTOQUE ---
 elif menu == "ESTOQUE":
-    st.header("📦 Gestão de Estoque")
-    dados = buscar_dados("estoque")
-    if dados:
-        df_e = pd.DataFrame(dados)
-        # Cálculo da Quantidade Disponível (Lógica do seu EXE)
-        df_e['Disponível'] = df_e['qtd_ini'] + df_e['compras'] - df_e['vendas'] - df_e.get('fiado', 0)
-        st.dataframe(df_e, use_container_width=True)
+    st.header("📦 Estoque")
+    estoque = buscar_dados("estoque")
+    if estoque:
+        df = pd.DataFrame(estoque)
+        # Lógica de cálculo idêntica ao EXE
+        df['Qtd Atual'] = df['qtd_ini'].fillna(0) + df['compras'].fillna(0) - df['vendas'].fillna(0)
+        st.dataframe(df, use_container_width=True)
 
         st.divider()
-        st.subheader("🛠️ Editar Produto / Entrada Manual")
-        with st.form("edit_form"):
+        st.subheader("🛠️ Editar Preço/Estoque")
+        with st.form("edit"):
             c1, c2, c3 = st.columns(3)
-            e_cod = c1.text_input("Código do Item")
-            e_preco = c2.number_input("Novo Preço Venda", min_value=0.0)
-            e_compra = c3.number_input("Adicionar Compras (Qtd)", min_value=0)
-            if st.form_submit_button("Salvar Alterações"):
-                # Busca item atual para somar compras
-                item_atual = next((p for p in dados if str(p['codigo']) == e_cod), None)
-                if item_atual:
-                    nova_compra = item_atual['compras'] + e_compra
+            e_cod = c1.text_input("Código do Produto")
+            e_preco = c2.number_input("Novo Preço", min_value=0.0)
+            e_compra = c3.number_input("Adicionar Compra", min_value=0)
+            if st.form_submit_button("Atualizar"):
+                item_e = next((p for p in estoque if str(p['codigo']) == e_cod), None)
+                if item_e:
+                    nova_compra = int(item_e.get('compras', 0)) + e_compra
                     httpx.patch(f"{URL}/estoque?codigo=eq.{e_cod}", headers=HEADERS,
                                 json={"preco_venda": e_preco, "compras": nova_compra})
-                    st.success("Estoque Atualizado!")
+                    st.success("Atualizado!")
                     st.rerun()
 
-# --- 4. FIADO (CLIENTES DEVENDO) ---
+# --- 4. FIADO ---
 elif menu == "FIADO":
-    st.header("📝 Controle de Fiados")
+    st.header("📝 Fiados")
     fiados = buscar_dados("fiado")
     if fiados:
         df_f = pd.DataFrame(fiados)
         st.table(df_f)
-
-        st.divider()
-        devedor = st.selectbox("Dar baixa em:", df_f['cliente'].unique())
-        if st.button("Marcar como Pago"):
+        devedor = st.selectbox("Baixa em:", df_f['cliente'].unique())
+        if st.button("Confirmar Pagamento"):
             httpx.delete(f"{URL}/fiado?cliente=eq.{devedor}", headers=HEADERS)
-            st.success(f"Dívida de {devedor} removida!")
             st.rerun()
 
-# --- 5. FLUXO CAIXA (FINANCEIRO) ---
+# --- 5. FLUXO CAIXA ---
 elif menu == "FLUXO CAIXA":
-    st.header("💰 Fluxo de Caixa Real")
+    st.header("💰 Fluxo de Caixa")
     vendas = buscar_dados("vendas")
     if vendas:
         df = pd.DataFrame(vendas)
-        faturamento = df['total_liq'].sum()
+        total = df['total_liq'].sum()
+        st.metric("Faturamento Total", f"R$ {total:.2f}")
+        st.subheader("Entradas por Método")
+        st.bar_chart(df.groupby('metodo')['total_liq'].sum())
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Entradas", f"R$ {faturamento:.2f}")
-        c2.metric("Nº de Vendas", len(df))
-        c3.metric("Ticket Médio", f"R$ {(faturamento / len(df)):.2f}")
-
-        st.subheader("Vendas por Método")
-        st.bar_chart(df['metodo'].value_counts())
-
-# --- 6. PRÓXIMAS COMPRAS (ALERTA) ---
+# --- 6. PRÓXIMAS COMPRAS ---
 elif menu == "PRÓXIMAS COMPRAS":
-    st.header("🛒 Sugestão de Reposição")
+    st.header("🛒 Reposição Necessária")
     estoque = buscar_dados("estoque")
     if estoque:
         df = pd.DataFrame(estoque)
-        df['Disponível'] = df['qtd_ini'] + df['compras'] - df['vendas']
-        # Filtra apenas o que está abaixo de 3 unidades
-        baixo_estoque = df[df['Disponível'] <= 3]
-        if not baixo_estoque.empty:
-            st.warning("Os itens abaixo precisam de reposição urgente!")
-            st.table(baixo_estoque[['codigo', 'nome', 'Disponível']])
-        else:
-            st.success("Todos os itens estão com estoque em dia!")
+        df['Qtd Atual'] = df['qtd_ini'].fillna(0) + df['compras'].fillna(0) - df['vendas'].fillna(0)
+        baixo = df[df['Qtd Atual'] <= 3]
+        st.table(baixo[['codigo', 'nome', 'Qtd Atual']])
 
-# --- 7. GRÁFICO (PERFORMANCE) ---
+# --- 7. GRÁFICO ---
 elif menu == "GRÁFICO":
-    st.header("📊 Análise de Performance")
+    st.header("📊 Performance de Produtos")
     vendas = buscar_dados("vendas")
     if vendas:
-        df_v = pd.DataFrame(vendas)
-        st.subheader("Produtos Mais Vendidos (Faturamento)")
-        chart_data = df_v.groupby('produto')['total_liq'].sum()
-        st.bar_chart(chart_data)
+        df = pd.DataFrame(vendas)
+        st.bar_chart(df.groupby('produto')['total_liq'].sum())
