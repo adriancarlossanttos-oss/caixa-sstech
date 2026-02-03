@@ -1,12 +1,11 @@
 import streamlit as st
 import httpx
 import pandas as pd
-from datetime import datetime
 
-# Configuração da Página
+# Configuração visual
 st.set_page_config(page_title="SS TECH WEB", layout="wide")
 
-# Credenciais Supabase (Mantenha as suas)
+# Suas credenciais do Supabase
 URL = "https://ikkcupfmcbuxnraboexx.supabase.co/rest/v1"
 HEADERS = {
     "apikey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlra2N1cGZtY2J1eG5yYWJvZXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk5ODU5NDYsImV4cCI6MjA4NTU2MTk0Nn0.rK5TSg2p2LJxrmqiTtlLZKylHnbE4cpFaWYxBDsASn0",
@@ -15,96 +14,76 @@ HEADERS = {
 }
 
 
-# --- FUNÇÕES DE BANCO ---
-def buscar_dados(tabela):
+# --- FUNÇÃO PARA BUSCAR DADOS ---
+@st.cache_data(ttl=10)  # Atualiza os dados a cada 10 segundos
+def get_data(table):
     try:
-        r = httpx.get(f"{URL}/{tabela}", headers=HEADERS)
+        r = httpx.get(f"{URL}/{table}", headers=HEADERS)
         return r.json()
     except:
         return []
 
 
-# --- MENU LATERAL ---
+# Menu Lateral
 st.sidebar.title("MENU SS TECH")
 menu = st.sidebar.radio("Ir para:",
                         ["CAIXA", "VENDAS", "ESTOQUE", "FIADO", "FLUXO CAIXA", "PRÓXIMAS COMPRAS", "GRÁFICO"])
 
-# --- ABA CAIXA ---
+# --- LÓGICA DAS ABAS ---
+
 if menu == "CAIXA":
     st.header("🛒 Frente de Caixa")
-    estoque = buscar_dados("estoque")
+    estoque_dados = get_data("estoque")
 
-    if estoque:
-        # Criar colunas para organizar o formulário
+    if estoque_dados:
+        # Criar a lista de seleção
+        lista_prods = [f"{p['codigo']} - {p['nome']}" for p in estoque_dados]
+
         col1, col2 = st.columns(2)
-
         with col1:
-            produtos_nomes = [f"{p['codigo']} - {p['nome']}" for p in estoque]
-            selecionado = st.selectbox("Selecione o Produto", produtos_nomes)
-            qtd = st.number_input("Quantidade", min_value=1, value=1)
+            prod_sel = st.selectbox("Selecione o Produto", lista_prods)
+            qtd = st.number_input("Quantidade", min_value=1, value=1, step=1)
             cliente = st.text_input("Nome do Cliente", "CONSUMIDOR")
 
         with col2:
-            metodo = st.selectbox("Forma de Pagamento", ["Dinheiro", "Pix", "Cartão Débito", "Cartão Crédito"])
-            desconto = st.number_input("Desconto (R$)", min_value=0.0, value=0.0)
-
-            # Pegar dados do item selecionado
-            item_cod = selecionado.split(" - ")[0]
-            item_data = next(p for p in estoque if str(p['codigo']) == item_cod)
-            preco = item_data['preco_venda']
-            subtotal = preco * qtd
-            total_liq = subtotal - desconto
-
-            st.write(f"### Total: R$ {total_liq:.2f}")
+            metodo = st.selectbox("Pagamento", ["Dinheiro", "Pix", "Cartão"])
+            # Buscar preço do item selecionado
+            cod_item = prod_sel.split(" - ")[0]
+            dados_item = next(p for p in estoque_dados if str(p['codigo']) == cod_item)
+            preco_un = dados_item['preco_venda']
+            total = preco_un * qtd
+            st.write(f"### Total: R$ {total:.2f}")
 
         if st.button("FINALIZAR VENDA", use_container_width=True):
-            # Lógica para registrar venda e atualizar estoque (POST e PATCH)
+            # Enviar para o banco (Vendas)
             nova_venda = {
-                "pedido": 0, "cod_item": item_cod, "produto": item_data['nome'],
-                "quantidade": qtd, "cliente": cliente, "metodo": metodo,
-                "forma": "À VISTA", "subtotal": subtotal, "desconto": desconto,
-                "total_liq": total_liq, "vendedor": "WEB"
+                "cod_item": cod_item, "produto": dados_item['nome'],
+                "quantidade": qtd, "total_liq": total, "metodo": metodo, "vendedor": "WEB"
             }
             httpx.post(f"{URL}/vendas", headers=HEADERS, json=nova_venda)
 
-            # Atualizar coluna 'vendas' no estoque
-            nova_qtd_venda = item_data['vendas'] + qtd
-            httpx.patch(f"{URL}/estoque?codigo=eq.{item_cod}", headers=HEADERS, json={"vendas": nova_qtd_venda})
+            # Baixar no estoque
+            nova_venda_qtd = dados_item['vendas'] + qtd
+            httpx.patch(f"{URL}/estoque?codigo=eq.{cod_item}", headers=HEADERS, json={"vendas": nova_venda_qtd})
 
-            st.success("Venda realizada e sincronizada!")
+            st.success("✅ Venda realizada com sucesso!")
+            st.rerun()
+    else:
+        st.error("Não foi possível carregar os produtos. Verifique o banco.")
 
-# --- ABA VENDAS ---
+elif menu == "ESTOQUE":
+    st.header("📦 Estoque Atual")
+    dados = get_data("estoque")
+    if dados:
+        df = pd.DataFrame(dados)
+        # Reorganizar colunas importantes
+        st.dataframe(df[['codigo', 'nome', 'preco_venda', 'qtd_ini', 'vendas']], use_container_width=True)
+
 elif menu == "VENDAS":
     st.header("📋 Relatório de Vendas")
-    vendas = buscar_dados("vendas")
-    if vendas:
-        df_vendas = pd.DataFrame(vendas)
-        st.dataframe(df_vendas, use_container_width=True)
+    dados = get_data("vendas")
+    if dados:
+        st.dataframe(pd.DataFrame(dados), use_container_width=True)
 
-# --- ABA ESTOQUE ---
-elif menu == "ESTOQUE":
-    st.header("📦 Controle de Estoque")
-    estoque = buscar_dados("estoque")
-    if estoque:
-        df_estoque = pd.DataFrame(estoque)
-        # Calcula quantidade atual conforme sua regra
-        df_estoque['QTD ATUAL'] = df_estoque['qtd_ini'] + df_estoque['compras'] - df_estoque['vendas'] - df_estoque[
-            'fiado'] - df_estoque['garantia']
-        st.dataframe(df_estoque, use_container_width=True)
-
-# --- OUTRAS ABAS (ESTRUTURA) ---
-elif menu == "FIADO":
-    st.header("📝 Controle de Fiado")
-    st.info("Espaço para gerenciar contas pendentes.")
-
-elif menu == "FLUXO CAIXA":
-    st.header("💰 Fluxo de Caixa")
-    st.write("Resumo financeiro das entradas e saídas.")
-
-elif menu == "PRÓXIMAS COMPRAS":
-    st.header("🛒 Sugestão de Compras")
-    st.write("Produtos com estoque baixo aparecerão aqui.")
-
-elif menu == "GRÁFICO":
-    st.header("📊 Desempenho de Vendas")
-    st.bar_chart(pd.DataFrame({"Vendas": [10, 20, 15, 30]}))
+else:
+    st.info(f"A aba {menu} está em desenvolvimento.")
