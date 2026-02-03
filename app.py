@@ -1,6 +1,7 @@
 import streamlit as st
 import httpx
 import pandas as pd
+from datetime import datetime
 
 # Configuração visual
 st.set_page_config(page_title="SS TECH WEB", layout="wide")
@@ -14,7 +15,6 @@ HEADERS = {
 }
 
 
-# Função de busca sem Cache agressivo para ver os dados na hora
 def get_data(table):
     try:
         r = httpx.get(f"{URL}/{table}", headers=HEADERS)
@@ -33,102 +33,98 @@ if menu == "CAIXA":
     st.header("🛒 Frente de Caixa")
     estoque_dados = get_data("estoque")
     if estoque_dados:
-        lista_prods = [f"{p['codigo']} - {p['nome']}" for p in estoque_dados if 'codigo' in p and 'nome' in p]
+        lista_prods = [f"{p['codigo']} - {p['nome']}" for p in estoque_dados if 'codigo' in p]
         col1, col2 = st.columns(2)
         with col1:
             prod_sel = st.selectbox("Selecione o Produto", lista_prods)
-            qtd = st.number_input("Quantidade", min_value=1, value=1, step=1)
-            cliente = st.text_input("Nome do Cliente", "CONSUMIDOR")
-            metodo = st.selectbox("Pagamento", ["Dinheiro", "Pix", "Cartão", "FIADO"])
+            qtd = st.number_input("Quantidade", min_value=1, value=1)
+            cliente = st.text_input("Cliente", "CONSUMIDOR")
+            metodo = st.selectbox("Método", ["Dinheiro", "Pix", "Cartão"])
 
         with col2:
             cod_item = prod_sel.split(" - ")[0]
-            dados_item = next(p for p in estoque_dados if str(p['codigo']) == cod_item)
-            preco_un = float(dados_item.get('preco_venda', 0))
-            total = preco_un * qtd
+            item = next(p for p in estoque_dados if str(p['codigo']) == cod_item)
+            total = float(item.get('preco_venda', 0)) * qtd
             st.write(f"### Total: R$ {total:.2f}")
 
         if st.button("FINALIZAR VENDA", use_container_width=True):
-            # Enviar Venda (Garante os mesmos nomes de coluna que o seu banco usa)
-            nova_venda = {
+            # 1. Salvar na tabela 'vendas' (usando colunas do seu print)
+            venda = {
                 "cod_item": cod_item,
-                "produto": dados_item['nome'],
-                "quantidade": qtd,
-                "total_liq": total,
+                "produto": item['nome'],
+                "cliente": cliente,
                 "metodo": metodo,
-                "vendedor": "WEB"
+                "forma": metodo,
+                "data_hora": datetime.now().isoformat()
             }
-            httpx.post(f"{URL}/vendas", headers=HEADERS, json=nova_venda)
+            httpx.post(f"{URL}/vendas", headers=HEADERS, json=venda)
 
-            # Baixar no estoque
-            vendas_atuais = int(dados_item.get('vendas', 0) or 0)
-            httpx.patch(f"{URL}/estoque?codigo=eq.{cod_item}", headers=HEADERS, json={"vendas": vendas_atuais + qtd})
+            # 2. Salvar na tabela 'fluxo' (conforme image_e14ec3.png)
+            fluxo = {
+                "tipo": "VENDA",
+                "valor": total,
+                "descricao": f"Venda: {item['nome']}",
+                "observacao": f"Cliente: {cliente}"
+            }
+            httpx.post(f"{URL}/fluxo", headers=HEADERS, json=fluxo)
 
-            if metodo == "FIADO":
-                httpx.post(f"{URL}/fiado", headers=HEADERS, json={"cliente": cliente, "valor": total})
+            # 3. Baixar Estoque
+            nova_venda_qtd = int(item.get('vendas', 0) or 0) + qtd
+            httpx.patch(f"{URL}/estoque?codigo=eq.{cod_item}", headers=HEADERS, json={"vendas": nova_venda_qtd})
 
-            st.success("✅ Venda realizada!")
+            st.success("✅ Venda salva em Vendas e Fluxo!")
             st.rerun()
 
-# --- 2. VENDAS (MOSTRAR TUDO) ---
+# --- 2. VENDAS ---
 elif menu == "VENDAS":
     st.header("📋 Relatório de Vendas")
     dados = get_data("vendas")
     if dados:
-        df = pd.DataFrame(dados)
-        st.dataframe(df, use_container_width=True)  # Mostra todas as colunas existentes no banco
+        st.dataframe(pd.DataFrame(dados), use_container_width=True)
     else:
-        st.info("Nenhuma venda encontrada no banco de dados.")
+        st.info("Tabela de vendas vazia.")
 
 # --- 3. ESTOQUE ---
 elif menu == "ESTOQUE":
-    st.header("📦 Estoque Atual")
+    st.header("📦 Estoque")
     dados = get_data("estoque")
     if dados:
         df = pd.DataFrame(dados)
-        if 'qtd_ini' in df.columns:
-            df['Disponível'] = df['qtd_ini'].fillna(0) + df.get('compras', 0).fillna(0) - df.get('vendas', 0).fillna(0)
+        df['Disponível'] = df.get('qtd_ini', 0).fillna(0) + df.get('compras', 0).fillna(0) - df.get('vendas', 0).fillna(
+            0)
         st.dataframe(df, use_container_width=True)
 
 # --- 4. FIADO ---
 elif menu == "FIADO":
-    st.header("📝 Clientes em Aberto")
+    st.header("📝 Fiados")
     dados = get_data("fiado")
     if dados:
         st.dataframe(pd.DataFrame(dados), use_container_width=True)
 
 # --- 5. FLUXO CAIXA ---
 elif menu == "FLUXO CAIXA":
-    st.header("💰 Fluxo Financeiro")
-    vendas = get_data("vendas")
-    if vendas:
-        df = pd.DataFrame(vendas)
-        # Tenta encontrar a coluna de valor independente do nome
-        col_valor = 'total_liq' if 'total_liq' in df.columns else 'total'
-        if col_valor in df.columns:
-            df[col_valor] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
-            st.metric("Total Vendido (R$)", f"{df[col_valor].sum():.2f}")
-            st.write("Faturamento por Método:")
-            st.bar_chart(df.groupby('metodo')[col_valor].sum())
+    st.header("💰 Fluxo de Caixa (Tabela Fluxo)")
+    dados = get_data("fluxo")  # Nome correto da sua tabela
+    if dados:
+        df = pd.DataFrame(dados)
+        if 'valor' in df.columns:
+            st.metric("Saldo Total", f"R$ {df['valor'].sum():.2f}")
+        st.dataframe(df, use_container_width=True)
 
 # --- 6. PRÓXIMAS COMPRAS ---
 elif menu == "PRÓXIMAS COMPRAS":
-    st.header("🛒 Necessidade de Reposição")
+    st.header("🛒 Compras Necessárias")
     estoque = get_data("estoque")
     if estoque:
         df = pd.DataFrame(estoque)
-        df['Disponível'] = df.get('qtd_ini', 0).fillna(0) + df.get('compras', 0).fillna(0) - df.get('vendas', 0).fillna(
-            0)
-        baixo = df[df['Disponível'] <= 3]
-        st.table(baixo[['codigo', 'nome', 'Disponível']])
+        df['Qtd'] = df.get('qtd_ini', 0).fillna(0) + df.get('compras', 0).fillna(0) - df.get('vendas', 0).fillna(0)
+        st.table(df[df['Qtd'] <= 3][['codigo', 'nome', 'Qtd']])
 
 # --- 7. GRÁFICO ---
 elif menu == "GRÁFICO":
-    st.header("📊 Desempenho")
-    vendas = get_data("vendas")
+    st.header("📊 Resumo Visual")
+    vendas = get_data("fluxo")
     if vendas:
         df = pd.DataFrame(vendas)
-        col_valor = 'total_liq' if 'total_liq' in df.columns else 'total'
-        if col_valor in df.columns:
-            df[col_valor] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
-            st.bar_chart(df.groupby('produto')[col_valor].sum())
+        if 'valor' in df.columns:
+            st.bar_chart(df.groupby('descricao')['valor'].sum())
