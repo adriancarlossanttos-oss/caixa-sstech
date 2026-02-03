@@ -44,35 +44,45 @@ if menu == "CAIXA":
         with col2:
             cod_item = prod_sel.split(" - ")[0]
             item = next(p for p in estoque_dados if str(p['codigo']) == cod_item)
-            total = float(item.get('preco_venda', 0)) * qtd
-            st.write(f"### Total: R$ {total:.2f}")
+            preco_v = float(item.get('preco_venda', 0))
+            subtotal = preco_v * qtd
+            desconto = st.number_input("Desconto (R$)", min_value=0.0, value=0.0)
+            total_liq = subtotal - desconto
+            st.write(f"### Total: R$ {total_liq:.2f}")
 
         if st.button("FINALIZAR VENDA", use_container_width=True):
-            # 1. Salvar na tabela 'vendas' (usando colunas do seu print)
-            venda = {
-                "cod_item": cod_item,
-                "produto": item['nome'],
-                "cliente": cliente,
-                "metodo": metodo,
-                "forma": metodo,
-                "data_hora": datetime.now().isoformat()
-            }
-            httpx.post(f"{URL}/vendas", headers=HEADERS, json=venda)
+            agora = datetime.now().isoformat()
 
-            # 2. Salvar na tabela 'fluxo' (conforme image_e14ec3.png)
-            fluxo = {
-                "tipo": "VENDA",
-                "valor": total,
-                "descricao": f"Venda: {item['nome']}",
-                "observacao": f"Cliente: {cliente}"
+            # 1. Salvar na tabela 'vendas' preenchendo TUDO (conforme image_e15398.png)
+            venda_payload = {
+                "data_hora": agora,
+                "cod_item": str(cod_item),
+                "produto": str(item['nome']),
+                "cliente": str(cliente),
+                "metodo": str(metodo),
+                "forma": str(metodo),
+                "subtotal": float(subtotal),
+                "desconto": float(desconto),
+                "total_liq": float(total_liq),
+                "vendedor": "WEB"
             }
-            httpx.post(f"{URL}/fluxo", headers=HEADERS, json=fluxo)
+            httpx.post(f"{URL}/vendas", headers=HEADERS, json=venda_payload)
+
+            # 2. Salvar na tabela 'fluxo' para o financeiro
+            fluxo_payload = {
+                "tipo": "VENDA",
+                "valor": float(total_liq),
+                "descricao": f"Venda: {item['nome']}",
+                "observacao": f"Cliente: {cliente}",
+                "created_at": agora
+            }
+            httpx.post(f"{URL}/fluxo", headers=HEADERS, json=fluxo_payload)
 
             # 3. Baixar Estoque
-            nova_venda_qtd = int(item.get('vendas', 0) or 0) + qtd
-            httpx.patch(f"{URL}/estoque?codigo=eq.{cod_item}", headers=HEADERS, json={"vendas": nova_venda_qtd})
+            vendas_atuais = int(item.get('vendas', 0) or 0)
+            httpx.patch(f"{URL}/estoque?codigo=eq.{cod_item}", headers=HEADERS, json={"vendas": vendas_atuais + qtd})
 
-            st.success("✅ Venda salva em Vendas e Fluxo!")
+            st.success("✅ Venda e Fluxo atualizados com sucesso!")
             st.rerun()
 
 # --- 2. VENDAS ---
@@ -80,9 +90,11 @@ elif menu == "VENDAS":
     st.header("📋 Relatório de Vendas")
     dados = get_data("vendas")
     if dados:
-        st.dataframe(pd.DataFrame(dados), use_container_width=True)
-    else:
-        st.info("Tabela de vendas vazia.")
+        df = pd.DataFrame(dados)
+        # Força a exibição das colunas financeiras
+        colunas_exibir = ['id', 'data_hora', 'cod_item', 'produto', 'cliente', 'metodo', 'subtotal', 'desconto',
+                          'total_liq']
+        st.dataframe(df[[c for c in colunas_exibir if c in df.columns]], use_container_width=True)
 
 # --- 3. ESTOQUE ---
 elif menu == "ESTOQUE":
@@ -103,12 +115,13 @@ elif menu == "FIADO":
 
 # --- 5. FLUXO CAIXA ---
 elif menu == "FLUXO CAIXA":
-    st.header("💰 Fluxo de Caixa (Tabela Fluxo)")
-    dados = get_data("fluxo")  # Nome correto da sua tabela
+    st.header("💰 Fluxo de Caixa")
+    dados = get_data("fluxo")
     if dados:
         df = pd.DataFrame(dados)
         if 'valor' in df.columns:
-            st.metric("Saldo Total", f"R$ {df['valor'].sum():.2f}")
+            df['valor'] = pd.to_numeric(df['valor'], errors='coerce').fillna(0)
+            st.metric("Saldo em Caixa", f"R$ {df['valor'].sum():.2f}")
         st.dataframe(df, use_container_width=True)
 
 # --- 6. PRÓXIMAS COMPRAS ---
@@ -122,7 +135,7 @@ elif menu == "PRÓXIMAS COMPRAS":
 
 # --- 7. GRÁFICO ---
 elif menu == "GRÁFICO":
-    st.header("📊 Resumo Visual")
+    st.header("📊 Performance")
     vendas = get_data("fluxo")
     if vendas:
         df = pd.DataFrame(vendas)
