@@ -2,6 +2,7 @@ import streamlit as st
 import httpx
 import pandas as pd
 from datetime import datetime
+import time
 
 # Configuração visual
 st.set_page_config(page_title="SS TECH WEB", layout="wide")
@@ -32,58 +33,77 @@ menu = st.sidebar.radio("Ir para:",
 if menu == "CAIXA":
     st.header("🛒 Frente de Caixa")
     estoque_dados = get_data("estoque")
+
     if estoque_dados:
         lista_prods = [f"{p['codigo']} - {p['nome']}" for p in estoque_dados if 'codigo' in p]
+
         col1, col2 = st.columns(2)
         with col1:
-            prod_sel = st.selectbox("Selecione o Produto", lista_prods)
-            qtd = st.number_input("Quantidade", min_value=1, value=1)
-            cliente = st.text_input("Cliente", "CONSUMIDOR")
-            metodo = st.selectbox("Método", ["Dinheiro", "Pix", "Cartão"])
+            prod_sel = st.selectbox("Selecione o Produto", lista_prods, key="prod_box")
+            qtd = st.number_input("Quantidade", min_value=1, value=1, key="qtd_box")
+            cliente = st.text_input("Cliente", "CONSUMIDOR", key="cli_box")
+            metodo = st.selectbox("Método", ["Dinheiro", "Pix", "Cartão"], key="met_box")
 
         with col2:
             cod_item = prod_sel.split(" - ")[0]
             item = next(p for p in estoque_dados if str(p['codigo']) == cod_item)
+
             preco_v = float(item.get('preco_venda', 0))
+            preco_c = float(item.get('preco_custo', 0))  # Busca o preço de custo
+
             subtotal = preco_v * qtd
-            desconto = st.number_input("Desconto (R$)", min_value=0.0, value=0.0)
+            desconto = st.number_input("Desconto (R$ total)", min_value=0.0, value=0.0, key="desc_box")
             total_liq = subtotal - desconto
+
             st.write(f"### Total: R$ {total_liq:.2f}")
+            st.caption(f"Preço Unitário: R$ {preco_v:.2f} | Custo Unitário: R$ {preco_c:.2f}")
 
         if st.button("FINALIZAR VENDA", use_container_width=True):
-            agora = datetime.now().isoformat()
+            # TRAVA DE SEGURANÇA: O total da venda não pode ser menor que o custo total dos itens
+            custo_total = preco_c * qtd
 
-            # 1. Salvar na tabela 'vendas' preenchendo TUDO
-            venda_payload = {
-                "data_hora": agora,
-                "cod_item": str(cod_item),
-                "produto": str(item['nome']),
-                "cliente": str(cliente),
-                "metodo": str(metodo),
-                "forma": str(metodo),
-                "subtotal": float(subtotal),
-                "desconto": float(desconto),
-                "total_liq": float(total_liq),
-                "vendedor": "WEB"
-            }
-            httpx.post(f"{URL}/vendas", headers=HEADERS, json=venda_payload)
+            if total_liq < custo_total:
+                st.error(
+                    f"❌ Venda Bloqueada! O valor final (R$ {total_liq:.2f}) é menor que o preço de custo (R$ {custo_total:.2f}). Reduza o desconto.")
+            else:
+                with st.spinner("Processando venda..."):
+                    agora = datetime.now().isoformat()
 
-            # 2. Salvar na tabela 'fluxo' como ENTRADA (Corrigido para não ficar negativo)
-            fluxo_payload = {
-                "tipo": "ENTRADA",  # Garante que entre somando
-                "valor": float(abs(total_liq)),  # abs garante que o número seja positivo
-                "descricao": f"Venda: {item['nome']}",
-                "observacao": f"Cliente: {cliente}",
-                "created_at": agora
-            }
-            httpx.post(f"{URL}/fluxo", headers=HEADERS, json=fluxo_payload)
+                    # 1. Salvar na tabela 'vendas'
+                    venda_payload = {
+                        "data_hora": agora,
+                        "cod_item": str(cod_item),
+                        "produto": str(item['nome']),
+                        "cliente": str(cliente),
+                        "metodo": str(metodo),
+                        "forma": str(metodo),
+                        "subtotal": float(subtotal),
+                        "desconto": float(desconto),
+                        "total_liq": float(total_liq),
+                        "vendedor": "WEB"
+                    }
+                    httpx.post(f"{URL}/vendas", headers=HEADERS, json=venda_payload)
 
-            # 3. Baixar Estoque
-            vendas_atuais = int(item.get('vendas', 0) or 0)
-            httpx.patch(f"{URL}/estoque?codigo=eq.{cod_item}", headers=HEADERS, json={"vendas": vendas_atuais + qtd})
+                    # 2. Salvar na tabela 'fluxo' como ENTRADA
+                    fluxo_payload = {
+                        "tipo": "ENTRADA",
+                        "valor": float(total_liq),
+                        "descricao": f"Venda: {item['nome']}",
+                        "observacao": f"Cliente: {cliente}",
+                        "created_at": agora
+                    }
+                    httpx.post(f"{URL}/fluxo", headers=HEADERS, json=fluxo_payload)
 
-            st.success("✅ Venda registrada como ENTRADA no Fluxo!")
-            st.rerun()
+                    # 3. Baixar Estoque
+                    vendas_atuais = int(item.get('vendas', 0) or 0)
+                    httpx.patch(f"{URL}/estoque?codigo=eq.{cod_item}", headers=HEADERS,
+                                json={"vendas": vendas_atuais + qtd})
+
+                    # MENSAGEM DE SUCESSO E LIMPEZA
+                    st.balloons()
+                    st.success(f"✅ VENDA FINALIZADA COM SUCESSO! (Total: R$ {total_liq:.2f})")
+                    time.sleep(2)  # Pausa para o usuário ler a mensagem
+                    st.rerun()  # Limpa a tela reiniciando o app
 
 # --- 2. VENDAS ---
 elif menu == "VENDAS":
@@ -121,7 +141,6 @@ elif menu == "FLUXO CAIXA":
     if dados:
         df = pd.DataFrame(dados)
         if 'valor' in df.columns and 'tipo' in df.columns:
-            # Lógica para somar ENTRADA e subtrair SAIDA
             df['valor_calc'] = df.apply(lambda x: x['valor'] if str(x['tipo']).upper() == "ENTRADA" else -x['valor'],
                                         axis=1)
             st.metric("Saldo Real em Caixa", f"R$ {df['valor_calc'].sum():.2f}")
