@@ -48,28 +48,31 @@ if menu == "CAIXA":
             cod_item = prod_sel.split(" - ")[0]
             item = next(p for p in estoque_dados if str(p['codigo']) == cod_item)
 
+            # Ajuste de Colunas baseado no seu banco
             preco_v = float(item.get('preco_venda', 0))
-            preco_c = float(item.get('preco_custo', 0))  # Busca o preço de custo
+
+            # Tenta pegar 'P.COMPRA (MÉD)', se não existir tenta 'preco_custo', se não 0
+            preco_c = float(item.get('P.COMPRA (MÉD)') or item.get('preco_custo') or 0)
 
             subtotal = preco_v * qtd
             desconto = st.number_input("Desconto (R$ total)", min_value=0.0, value=0.0, key="desc_box")
             total_liq = subtotal - desconto
 
             st.write(f"### Total: R$ {total_liq:.2f}")
-            st.caption(f"Preço Unitário: R$ {preco_v:.2f} | Custo Unitário: R$ {preco_c:.2f}")
+            st.info(f"Unitário: R$ {preco_v:.2f} | Custo Médio: R$ {preco_c:.2f}")
 
         if st.button("FINALIZAR VENDA", use_container_width=True):
-            # TRAVA DE SEGURANÇA: O total da venda não pode ser menor que o custo total dos itens
             custo_total = preco_c * qtd
 
+            # Trava de segurança
             if total_liq < custo_total:
                 st.error(
-                    f"❌ Venda Bloqueada! O valor final (R$ {total_liq:.2f}) é menor que o preço de custo (R$ {custo_total:.2f}). Reduza o desconto.")
+                    f"❌ Desconto excessivo! O valor final (R$ {total_liq:.2f}) é menor que o custo (R$ {custo_total:.2f}).")
             else:
-                with st.spinner("Processando venda..."):
+                with st.spinner("Gravando dados..."):
                     agora = datetime.now().isoformat()
 
-                    # 1. Salvar na tabela 'vendas'
+                    # 1. Vendas
                     venda_payload = {
                         "data_hora": agora,
                         "cod_item": str(cod_item),
@@ -84,7 +87,7 @@ if menu == "CAIXA":
                     }
                     httpx.post(f"{URL}/vendas", headers=HEADERS, json=venda_payload)
 
-                    # 2. Salvar na tabela 'fluxo' como ENTRADA
+                    # 2. Fluxo (como ENTRADA)
                     fluxo_payload = {
                         "tipo": "ENTRADA",
                         "valor": float(total_liq),
@@ -99,11 +102,10 @@ if menu == "CAIXA":
                     httpx.patch(f"{URL}/estoque?codigo=eq.{cod_item}", headers=HEADERS,
                                 json={"vendas": vendas_atuais + qtd})
 
-                    # MENSAGEM DE SUCESSO E LIMPEZA
                     st.balloons()
-                    st.success(f"✅ VENDA FINALIZADA COM SUCESSO! (Total: R$ {total_liq:.2f})")
-                    time.sleep(2)  # Pausa para o usuário ler a mensagem
-                    st.rerun()  # Limpa a tela reiniciando o app
+                    st.success("✅ Venda Finalizada!")
+                    time.sleep(1.5)
+                    st.rerun()
 
 # --- 2. VENDAS ---
 elif menu == "VENDAS":
@@ -111,11 +113,8 @@ elif menu == "VENDAS":
     dados = get_data("vendas")
     if dados:
         df = pd.DataFrame(dados)
-        colunas_exibir = ['id', 'data_hora', 'cod_item', 'produto', 'cliente', 'metodo', 'subtotal', 'desconto',
-                          'total_liq']
-        st.dataframe(df[[c for c in colunas_exibir if c in df.columns]], use_container_width=True)
-    else:
-        st.info("Nenhuma venda encontrada.")
+        colunas = ['id', 'data_hora', 'cod_item', 'produto', 'cliente', 'metodo', 'subtotal', 'desconto', 'total_liq']
+        st.dataframe(df[[c for c in colunas if c in df.columns]], use_container_width=True)
 
 # --- 3. ESTOQUE ---
 elif menu == "ESTOQUE":
@@ -143,7 +142,7 @@ elif menu == "FLUXO CAIXA":
         if 'valor' in df.columns and 'tipo' in df.columns:
             df['valor_calc'] = df.apply(lambda x: x['valor'] if str(x['tipo']).upper() == "ENTRADA" else -x['valor'],
                                         axis=1)
-            st.metric("Saldo Real em Caixa", f"R$ {df['valor_calc'].sum():.2f}")
+            st.metric("Saldo Real", f"R$ {df['valor_calc'].sum():.2f}")
         st.dataframe(df, use_container_width=True)
 
 # --- 6. PRÓXIMAS COMPRAS ---
