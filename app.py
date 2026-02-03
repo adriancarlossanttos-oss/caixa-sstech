@@ -53,7 +53,7 @@ if menu == "CAIXA":
         if st.button("FINALIZAR VENDA", use_container_width=True):
             agora = datetime.now().isoformat()
 
-            # 1. Salvar na tabela 'vendas' preenchendo TUDO (conforme image_e15398.png)
+            # 1. Salvar na tabela 'vendas' preenchendo TUDO
             venda_payload = {
                 "data_hora": agora,
                 "cod_item": str(cod_item),
@@ -68,10 +68,10 @@ if menu == "CAIXA":
             }
             httpx.post(f"{URL}/vendas", headers=HEADERS, json=venda_payload)
 
-            # 2. Salvar na tabela 'fluxo' para o financeiro
+            # 2. Salvar na tabela 'fluxo' como ENTRADA (Corrigido para não ficar negativo)
             fluxo_payload = {
-                "tipo": "VENDA",
-                "valor": float(total_liq),
+                "tipo": "ENTRADA",  # Garante que entre somando
+                "valor": float(abs(total_liq)),  # abs garante que o número seja positivo
                 "descricao": f"Venda: {item['nome']}",
                 "observacao": f"Cliente: {cliente}",
                 "created_at": agora
@@ -82,7 +82,7 @@ if menu == "CAIXA":
             vendas_atuais = int(item.get('vendas', 0) or 0)
             httpx.patch(f"{URL}/estoque?codigo=eq.{cod_item}", headers=HEADERS, json={"vendas": vendas_atuais + qtd})
 
-            st.success("✅ Venda e Fluxo atualizados com sucesso!")
+            st.success("✅ Venda registrada como ENTRADA no Fluxo!")
             st.rerun()
 
 # --- 2. VENDAS ---
@@ -91,10 +91,11 @@ elif menu == "VENDAS":
     dados = get_data("vendas")
     if dados:
         df = pd.DataFrame(dados)
-        # Força a exibição das colunas financeiras
         colunas_exibir = ['id', 'data_hora', 'cod_item', 'produto', 'cliente', 'metodo', 'subtotal', 'desconto',
                           'total_liq']
         st.dataframe(df[[c for c in colunas_exibir if c in df.columns]], use_container_width=True)
+    else:
+        st.info("Nenhuma venda encontrada.")
 
 # --- 3. ESTOQUE ---
 elif menu == "ESTOQUE":
@@ -119,9 +120,11 @@ elif menu == "FLUXO CAIXA":
     dados = get_data("fluxo")
     if dados:
         df = pd.DataFrame(dados)
-        if 'valor' in df.columns:
-            df['valor'] = pd.to_numeric(df['valor'], errors='coerce').fillna(0)
-            st.metric("Saldo em Caixa", f"R$ {df['valor'].sum():.2f}")
+        if 'valor' in df.columns and 'tipo' in df.columns:
+            # Lógica para somar ENTRADA e subtrair SAIDA
+            df['valor_calc'] = df.apply(lambda x: x['valor'] if str(x['tipo']).upper() == "ENTRADA" else -x['valor'],
+                                        axis=1)
+            st.metric("Saldo Real em Caixa", f"R$ {df['valor_calc'].sum():.2f}")
         st.dataframe(df, use_container_width=True)
 
 # --- 6. PRÓXIMAS COMPRAS ---
@@ -131,11 +134,12 @@ elif menu == "PRÓXIMAS COMPRAS":
     if estoque:
         df = pd.DataFrame(estoque)
         df['Qtd'] = df.get('qtd_ini', 0).fillna(0) + df.get('compras', 0).fillna(0) - df.get('vendas', 0).fillna(0)
-        st.table(df[df['Qtd'] <= 3][['codigo', 'nome', 'Qtd']])
+        baixo = df[df['Qtd'] <= 3]
+        st.table(baixo[['codigo', 'nome', 'Qtd']])
 
 # --- 7. GRÁFICO ---
 elif menu == "GRÁFICO":
-    st.header("📊 Performance")
+    st.header("📊 Performance Visual")
     vendas = get_data("fluxo")
     if vendas:
         df = pd.DataFrame(vendas)
